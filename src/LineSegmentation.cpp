@@ -9,8 +9,8 @@ LineSegmentation::LineSegmentation(string path_of_image, string out) {
 
 void
 LineSegmentation::read_image() {
-    this->color_img = imread(this->image_path, CV_LOAD_IMAGE_COLOR);
-    this->grey_img = imread(this->image_path, CV_LOAD_IMAGE_GRAYSCALE);
+    this->color_img = cv::imread(this->image_path, cv::IMREAD_COLOR);
+    this->grey_img = cv::imread(this->image_path, cv::IMREAD_GRAYSCALE);
 }
 
 void
@@ -22,7 +22,7 @@ LineSegmentation::pre_process_image() {
     cv::blur(grey_img, smoothed_img, Size(3, 3), Point(-1, -1));
 
     // OTSU threshold and Binarization.
-    cv::threshold(smoothed_img, binary_img, 0.0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+    cv::threshold(smoothed_img, binary_img, 0.0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
     imwrite(OUT_PATH+"Binary_image.jpg", this->binary_img);
 }
 
@@ -32,7 +32,7 @@ LineSegmentation::find_contours() {
 
     vector<vector<Point>> contours;
     vector<Vec4i> hierarchy;
-    findContours(img_clone, contours, hierarchy, CV_RETR_LIST, CV_CHAIN_APPROX_NONE, Point(0, 0));
+    cv::findContours(img_clone, contours, hierarchy, cv::RETR_LIST, cv::CHAIN_APPROX_NONE, cv::Point(0, 0));
 
     // Initializing rectangular and poly vectors.
     vector<vector<Point> > contours_poly(contours.size());
@@ -145,9 +145,12 @@ LineSegmentation::get_initial_lines() {
     valleys_min_abs_dist /= number_of_heights;
     cout << "Estimated avg line height " << valleys_min_abs_dist << endl;
     this->predicted_line_height = valleys_min_abs_dist;
-
+    
+    // Added some tolerance.
+    valleys_min_abs_dist = valleys_min_abs_dist * 1.2;
     // Start form the CHUNKS_TO_BE_PROCESSED chunk.
     for (int i = CHUNKS_TO_BE_PROCESSED - 1; i >= 0; i--) {
+        if (i<0 || i>=chunks.size()) continue; 
         if (chunks[i]->valleys.empty()) continue;
 
         // Connect each valley with the nearest ones in the left chunks.
@@ -203,6 +206,11 @@ LineSegmentation::save_lines_to_file(const vector<cv::Mat> &lines) {
 
 void
 LineSegmentation::labelImage(string path) {
+    if (initial_lines.empty()) {
+        std::cerr << "No initial lines found. Skipping labelImage." << std::endl;
+        return;
+    }
+
     cv::Mat img_clone = this->color_img.clone();
     vector<cv::Point> pointactualLine(initial_lines[0]->points.size());
     vector<cv::Point> pointnextLine;
@@ -252,6 +260,9 @@ LineSegmentation::generate_regions() {
     sort(this->initial_lines.begin(), this->initial_lines.end(), Line::comp_min_row_position);
 
     this->line_regions = vector<Region *>();
+    
+    // Fixed initialization bug.
+    this->avg_line_height = 0;
 
     // Add first region.
     Region *r = new Region(nullptr, this->initial_lines[0]);
@@ -400,32 +411,41 @@ LineSegmentation::component_belongs_to_above_region(Line &line, Rect &contour) {
 vector<cv::Mat>
 LineSegmentation::segment() {
     // Read image and process it.
+    std::cout << "Starting image processing." << std::endl;
     this->read_image();
     this->pre_process_image();
 
     // Find letters contours.
+    std::cout << "Finding letter contours." << std::endl;
     this->find_contours();
 
     // Divide image into vertical chunks.
+    std::cout << "Dividing into vertical chunks." << std::endl;
     this->generate_chunks();
 
     // Get initial lines.
+    std::cout << "Getting initial lines." << std::endl;
     this->get_initial_lines();
     this->save_image_with_lines(OUT_PATH+"Initial_Lines.jpg");
 
     // Get initial line regions.
+    std::cout << "Getting initial line regions.." << std::endl;
     this->generate_regions();
 
     // Repair initial lines and generate the final line regions.
+    std::cout << "Repairing lines.." << std::endl;
     this->repair_lines();
 
     // Generate the final line regions.
+    std::cout << "Generating the final regions." << std::endl;
     this->generate_regions();
 
+    std::cout << "Saving the image with lines.." << std::endl;
     this->save_image_with_lines(OUT_PATH+"Final_Lines.bmp");
-
-    //is neccesary to use bitmap or tiff for componente labeling
-    this->labelImage(OUT_PATH+"labels.bmp");
+    
+    //  std::cout << "Adding labeling." << std::endl;
+    //  is neccesary to use bitmap or tiff for component labeling
+    //  this->labelImage(OUT_PATH+"labels.bmp");
 
     return this->get_regions();
 }
