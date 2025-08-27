@@ -9,4 +9,6 @@ set(SOURCE_FILES
         src/main.cpp src/LineSegmentation.hpp src/LineSegmentation.cpp)
 
 add_executable(Image2Lines ${SOURCE_FILES})
+include_directories(${OpenCV_INCLUDE_DIRS})
 target_link_libraries(Image2Lines ${OpenCV_LIBS})
+
