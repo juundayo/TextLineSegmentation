@@ -1,4 +1,7 @@
 #include "LineSegmentation.hpp"
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 LineSegmentation::LineSegmentation(string path_of_image, string out) {
     this->image_path = path_of_image;
@@ -94,8 +97,8 @@ LineSegmentation::generate_chunks() {
                                                                         cv::Range(start_pixel, start_pixel +
                                                                                                chunk_width)));
         this->chunks.push_back(c);
-
-        imwrite(OUT_PATH+"Chunk" + to_string(i_chunk) + ".jpg", this->chunks.back()->img);
+        // We don't need images of the chunks!
+        // imwrite(OUT_PATH+"Chunk" + to_string(i_chunk) + ".jpg", this->chunks.back()->img);
 
         start_pixel += chunk_width;
     }
@@ -176,16 +179,13 @@ LineSegmentation::save_image_with_lines(string path) {
 
     for (auto line : initial_lines) {
         int last_row = -1;
-        //std::cout<<"new line"<<endl;
         for (auto point : line->points) {
             img_clone.at<Vec3b>(point.x, point.y) = TEST_LINE_COLOR;
-            //std::cout<<" ii="+std::to_string(point.y)+" jj="+std::to_string(point.x)<<endl;
                 
             // Check and draw vertical lines if found.
             if (last_row != -1 && point.x != last_row) {
                 for (int i = min(last_row, point.x); i < max(last_row, point.x); i++) {
                     img_clone.at<Vec3b>(i, point.y) = TEST_LINE_COLOR;
-                    //std::cout<<" i="+std::to_string(point.y)+" j="+std::to_string(i)<<endl;
                 }
             }
 
@@ -204,6 +204,110 @@ LineSegmentation::save_lines_to_file(const vector<cv::Mat> &lines) {
     }
 }
 
+
+void 
+LineSegmentation::save_label_image(const std::vector<cv::Mat> &regions, const std::string &out_path) {
+    fs::path target;
+    target = fs::path(OUT_PATH);
+    if (!target.has_extension()) target += ".png";
+
+    cv::Size sz;
+    if (!this->binary_img.empty()) sz = this->binary_img.size();
+    else if (!this->color_img.empty()) sz = this->color_img.size();
+    else if (!regions.empty()) sz = regions[0].size();
+    else {
+        std::cerr << "[save_label_image] No input image or regions available to determine size.\n";
+        return;
+    }
+
+    // 0 = background, 1 = line0, 2 = line1, ...
+    cv::Mat labels = cv::Mat::zeros(sz, CV_8U); 
+
+    if (!this->outFinal_lines.empty()) {
+        std::cout << "[save_label_image] encoding using finalLines (" << this->outFinal_lines.size() << " lines)\n";
+        for (size_t li = 0; li < this->outFinal_lines.size(); ++li) {
+            Line *line = this->outFinal_lines[li];
+            if (!line) continue;
+            if (line->points.empty()) {continue;}
+
+            int label_value = static_cast<int>(li);
+            uint8_t lab8 = label_value <= 255 ? static_cast<uint8_t>(label_value) : 255;
+            if (label_value > 255)
+                std::cerr << "[save_label_image] Warning: label " << label_value << " will be clamped to 255\n";
+
+            int last_row = -1;
+            for (size_t p = 0; p < line->points.size(); ++p) {
+                Point pt = line->points[p];
+                int r = pt.x;
+                int c = pt.y;
+
+                // Bounds check.
+                if (r < 0 || r >= sz.height || c < 0 || c >= sz.width) continue;
+
+                labels.at<uchar>(r, c) = lab8;
+
+                if (last_row != -1 && last_row != r) {
+                    int r0 = std::min(last_row, r);
+                    int r1 = std::max(last_row, r);
+                    for (int rr = r0; rr <= r1; ++rr) {
+                        if (rr < 0 || rr >= sz.height) continue;
+                        labels.at<uchar>(rr, c) = lab8;
+                    }
+                }
+                last_row = r;
+            }
+
+            std::cout << "[save_label_image] outFinal_lines[" << li << "] labeled pixels: " 
+                      << cv::countNonZero(labels == lab8) << "\n";
+        }
+    } else if (!regions.empty()) {
+        // Fallback: combine provided region masks into one label image (earlier logic).
+        std::cout << "[save_label_image] outFinal_lines empty, falling back to regions vector (" << regions.size() << ")\n";
+        for (size_t i = 0; i < regions.size(); ++i) {
+            cv::Mat mask = regions[i];
+            if (mask.size() != sz) cv::resize(mask, mask, sz, 0, 0, cv::INTER_NEAREST);
+
+            cv::Mat gray;
+            if (mask.channels() > 1) cv::cvtColor(mask, gray, cv::COLOR_BGR2GRAY);
+            else gray = mask;
+
+            cv::Mat bin;
+            cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY);
+
+            int label_value = int(i) + 1;
+            uint8_t lab8 = label_value <= 255 ? static_cast<uint8_t>(label_value) : 255;
+            if (label_value > 255)
+                std::cerr << "[save_label_image] Warning: region index " << i << " exceeds 254 and will be clamped to 255\n";
+
+            // Only assign to unlabeled pixels so regions don't overwrite earlier ones.
+            cv::Mat unlabeled = (labels == 0);
+            cv::Mat assignMask;
+            cv::bitwise_and(bin, unlabeled, assignMask);
+
+            labels.setTo(lab8, assignMask);
+            std::cout << "[save_label_image] region " << i+1 << " assigned pixels: " << cv::countNonZero(assignMask) << "\n";
+        }
+    } else {
+        std::cerr << "[save_label_image] No lines or regions to encode.\n";
+    }
+
+    double minV, maxV; cv::minMaxLoc(labels, &minV, &maxV);
+    std::cout << "[save_label_image] final label range: " << minV << " .. " << maxV << "\n";
+
+    // Writing the 8-bit PNG.
+    try {
+        if (cv::imwrite(target.string(), labels)) {
+            std::cout << "[save_label_image] labels saved (8-bit).\n";
+        } else {
+            std::cerr << "[save_label_image] imwrite returned false.\n";
+        }
+    } catch (const cv::Exception &e) {
+        std::cerr << "[save_label_image] cv::Exception: " << e.what() << "\n";
+    } catch (...) {
+        std::cerr << "[save_label_image] unknown exception while writing labels\n";
+    }
+}
+
 void
 LineSegmentation::labelImage(string path) {
     if (initial_lines.empty()) {
@@ -214,43 +318,88 @@ LineSegmentation::labelImage(string path) {
     cv::Mat img_clone = this->color_img.clone();
     vector<cv::Point> pointactualLine(initial_lines[0]->points.size());
     vector<cv::Point> pointnextLine;
-    //initialize line at 0,0
-    for(int i = 0; i<pointactualLine.size(); i++)
-        pointactualLine[i] = cv::Point(0,0);
+    
+    try {
+        for (int indexLine = 0; indexLine < initial_lines.size(); indexLine++) {
+            if (!initial_lines[indexLine]) {
+                std::cerr << "Warning: initial_lines[" << indexLine << "] is nullptr. Skipping." << std::endl;
+                continue;
+            }
+            
+            if (initial_lines[indexLine]->points.empty()) {
+                std::cerr << "Warning: Line " << indexLine << " has no points. Skipping." << std::endl;
+                continue;
+            }
+            
+            std::cout << "indexLine=" << indexLine << ", points=" << initial_lines[indexLine]->points.size() << std::endl;
+            pointnextLine = initial_lines[indexLine]->points;
+            
+            // Ensuring both lines have the same number of points for proper processing.
+            if (pointactualLine.size() != pointnextLine.size()) {
+                std::cerr << "Warning: Line " << indexLine << " has different point count (" 
+                          << pointnextLine.size() << " vs " << pointactualLine.size() 
+                          << "). Resizing may cause issues." << std::endl;
+                
+                // Using the smaller size to avoid out-of-bounds access.
+                int min_size = std::min(pointactualLine.size(), pointnextLine.size());
+                vector<cv::Point> actualTrimmed(pointactualLine.begin(), pointactualLine.begin() + min_size);
+                vector<cv::Point> nextTrimmed(pointnextLine.begin(), pointnextLine.begin() + min_size);
+                
+                this->labelComponent(nextTrimmed, actualTrimmed, img_clone);
+            } else {
+                this->labelComponent(pointnextLine, pointactualLine, img_clone);
+            }
+            
+            pointactualLine = pointnextLine;
+        }
 
-    for (int indexLine = 0; indexLine<initial_lines.size(); indexLine++) {
-        pointnextLine   = initial_lines[indexLine]->points;
+        // Processing the final "line" (right edge of image) - with bounds checking.
+        if (!pointnextLine.empty()) {
+            vector<cv::Point> finalLine(pointnextLine.size());
+            for(int i = 0; i < pointnextLine.size(); i++) {
+                // Ensuring we don't go beyond image bounds!
+                int x = std::min(this->color_img.cols, pointnextLine[i].x + 100); // Add some padding
+                finalLine[i] = cv::Point(x, pointnextLine[i].y);
+            }
+            this->labelComponent(finalLine, pointactualLine, img_clone);
+        }
 
-        this->labelComponent(pointnextLine, pointactualLine, img_clone);
-
-        pointactualLine = pointnextLine;
+        // Using PNG instead of BMP for better quality and compression.
+        string ext = path.substr(path.find_last_of(".") + 1);
+        if (ext == "bmp") {
+            path = path.substr(0, path.find_last_of(".")) + ".png";
+        }
+        
+        cv::imwrite(path, img_clone);
+        std::cout << "Label image saved successfully: " << path << std::endl;
+        
+    } catch (const cv::Exception& e) {
+        std::cerr << "OpenCV exception in labelImage: " << e.what() << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Standard exception in labelImage: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Unknown exception in labelImage" << std::endl;
     }
-
-    //for label last text line
-    for(int i = 0; i<pointnextLine.size(); i++)
-        pointnextLine[i] = cv::Point(this->color_img.cols, 0);
-
-    this->labelComponent(pointnextLine, pointactualLine, img_clone);
-    cv::imwrite(path, img_clone);
 }
 
 void
 LineSegmentation::labelComponent(const std::vector<cv::Point> &pointnextLine, const vector<cv::Point> &pointactualLine, cv::Mat &img_clone){
-    //for random color generation
+    int min_size = std::min(pointactualLine.size(), pointnextLine.size());
     int max = 220;
     int min = 30;
     cv::Vec3b randomColor = cv::Vec3b(rand() % max + min,rand() % max + min, redStart);
     
-    for (int indexPoint = 0; indexPoint < pointactualLine.size(); indexPoint++) 
-    {
-        auto nextPoint = pointnextLine  [indexPoint];
+    for (int indexPoint = 0; indexPoint < min_size; indexPoint++) {
+        auto nextPoint = pointnextLine[indexPoint];
         auto point     = pointactualLine[indexPoint];
 
-        for(int x_ = point.x; x_<nextPoint.x; x_++) {
-            if(img_clone.at<Vec3b>(x_, indexPoint)[2]<125)
-                img_clone.at<Vec3b>(x_, indexPoint) = randomColor;
+        for (int x_ = point.x; x_ < nextPoint.x; x_++) {
+            if (x_ >= 0 && x_ < img_clone.rows && indexPoint >= 0 && indexPoint < img_clone.cols) {
+                if (img_clone.at<Vec3b>(x_, indexPoint)[2] < 125)
+                    img_clone.at<Vec3b>(x_, indexPoint) = randomColor;
+            }
         }
-        redStart+=5;
+        redStart += 5;
     }
 }
 
@@ -410,6 +559,40 @@ LineSegmentation::component_belongs_to_above_region(Line &line, Rect &contour) {
 
 vector<cv::Mat>
 LineSegmentation::segment() {
+    // Cleaning output directory before running.
+    std::cout << "Output path: " << OUT_PATH << std::endl;
+    if (!OUT_PATH.empty()) {
+        try {
+            fs::path outp(OUT_PATH);
+            fs::path img_dir = outp.parent_path(); // if OUT_PATH == "img/out" -> img_dir == "img"
+            if (img_dir.empty()) img_dir = ".";
+
+            if (fs::exists(img_dir) && fs::is_directory(img_dir)) {
+                const std::vector<std::string> exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"};
+                for (auto &entry : fs::directory_iterator(img_dir)) {
+                    try {
+                        if (!fs::is_regular_file(entry.path())) continue;
+                        std::string ext = entry.path().extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        if (std::find(exts.begin(), exts.end(), ext) != exts.end()) {
+                            fs::remove(entry.path());
+                            std::cout << "[cleanup] removed image: " << entry.path().string() << "\n";
+                        }
+                    } catch (const std::exception &e) {
+                        std::cerr << "[cleanup] failed to remove " << entry.path().string()
+                                  << ": " << e.what() << "\n";
+                    }
+                }
+            } else {
+                // Createing img_dir (parent) if it doesn't exist.
+                fs::create_directories(img_dir);
+                std::cout << "[cleanup] created directory: " << img_dir.string() << "\n";
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "[cleanup] exception while clearing img folder: " << e.what() << "\n";
+        }
+    }
+    
     // Read image and process it.
     std::cout << "Starting image processing." << std::endl;
     this->read_image();
@@ -440,14 +623,19 @@ LineSegmentation::segment() {
     std::cout << "Generating the final regions." << std::endl;
     this->generate_regions();
 
-    std::cout << "Saving the image with lines.." << std::endl;
+    //std::cout << "Saving the image with lines.." << std::endl;
     this->save_image_with_lines(OUT_PATH+"Final_Lines.bmp");
-    
-    //  std::cout << "Adding labeling." << std::endl;
-    //  is neccesary to use bitmap or tiff for component labeling
-    //  this->labelImage(OUT_PATH+"labels.bmp");
 
-    return this->get_regions();
+    // Is neccesary to use bitmap or tiff for component labeling
+    std::cout << "Adding labeling." << std::endl;
+    this->labelImage(OUT_PATH+"labels.bmp");
+
+    // Saving an 8-bit encoding.
+    std::cout << "Saving 8-bit encoding." << std::endl;
+    auto regions = this->get_regions();
+    this->save_label_image(regions, "img/out/labels.png");
+
+    return regions;
 }
 
 vector<cv::Mat>
