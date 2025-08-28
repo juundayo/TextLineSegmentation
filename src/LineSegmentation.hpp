@@ -5,12 +5,10 @@
 #include <map>
 #include <cstring>
 #include <cmath>
-#include <cv.h>
 #include <math.h>
-#include <opencv/cv.hpp>
-#include "opencv2/imgproc/imgproc.hpp"
-#include "opencv2/highgui/highgui.hpp"
-#include "opencv2/core/core.hpp"
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -229,13 +227,16 @@ public:
     /// \param path
     void save_lines_to_file(const vector<cv::Mat> &lines);
 
+    std::vector<Line*> outFinal_lines;
+
+    // Saving the image in PNG 16-bit with label numbers.
+    void save_label_image(const std::vector<cv::Mat> &regions, const std::string &output_path);
+
     //document image labelling
     void labelImage(string path);
     //label a section of the image from y-pointactualLine to y1 pointnextLine
     void
     labelComponent(const vector<cv::Point> &pointnextLine, const vector<cv::Point> &pointactualLine, cv::Mat &img_clone);
-
-
 
 private:
     string OUT_PATH;
