@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.7)
 project(Image2Lines)
 find_package(OpenCV REQUIRED)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 set(SOURCE_FILES
         src/main.cpp src/LineSegmentation.hpp src/LineSegmentation.cpp)
@@ -11,4 +11,4 @@ set(SOURCE_FILES
 add_executable(Image2Lines ${SOURCE_FILES})
 include_directories(${OpenCV_INCLUDE_DIRS})
 target_link_libraries(Image2Lines ${OpenCV_LIBS})
-
+target_link_libraries(Image2Lines ${OpenCV_LIBS} stdc++fs)
