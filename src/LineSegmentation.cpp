@@ -449,8 +449,10 @@ void LineSegmentation::generate_regions() {
     // Creates first region (above first line).
     Region *r = new Region(nullptr, this->initial_lines[0]);
     r->update_region(this->binary_img, 0);
+
     this->initial_lines[0]->above = r;
     this->line_regions.push_back(r);
+
     if (r->height < this->predicted_line_height * 2.5)
         this->avg_line_height += r->height;
 
@@ -1017,94 +1019,88 @@ Region::Region(Line *top, Line *bottom) {
     this->top = top;
     this->bottom = bottom;
     this->height = 0;
+    this->pixel_count = 0;
 }
 
 // Extracts the image region between top and bottom lines.
 bool Region::update_region(Mat &binary_image, int region_id) {
     this->region_id = region_id;
 
+    this->pixel_count = 0;
+    this->mean = cv::Vec2f(0, 0);
+    this->covariance = cv::Mat::zeros(2, 2, CV_32F);
+
     int min_region_row = row_offset = (top == nullptr) ? 0 : top->min_row_position;
     int max_region_row = (bottom == nullptr) ? binary_image.rows : bottom->max_row_position;
 
-    int start = min(min_region_row, max_region_row), end = max(min_region_row, max_region_row);
+    int start = min(min_region_row, max_region_row);
+    int end = max(min_region_row, max_region_row);
 
     // Creates white region mask.
     region = Mat::ones(end - start, binary_image.cols, CV_8U) * 255;
 
     // Extracts the actual text content for this region.
     for (int c = 0; c < binary_image.cols; c++) {
-        int start = ((top == nullptr) ? 0 : top->points[c].x);
-        int end = ((bottom == nullptr) ? binary_image.rows - 1 : bottom->points[c].x);
+        int start_row = ((top == nullptr) ? 0 : top->points[c].x);
+        int end_row = ((bottom == nullptr) ? binary_image.rows - 1 : bottom->points[c].x);
 
         // Calculates region height.
-        if (end > start)
-            this->height = max(this->height, end - start);
+        if (end_row > start_row) {
+            this->height = max(this->height, end_row - start_row);
+        }
 
-        // Copies pixels from binary image to region.
-        for (int i = start; i < end; i++) {
-            region.at<uchar>(i - min_region_row, c) = binary_image.at<uchar>(i, c);
+        // Copies pixels from binary image to region and update statistics recursively.
+        for (int i = start_row; i < end_row; i++) {
+            uchar pixel_value = binary_image.at<uchar>(i, c);
+            int region_row = i - min_region_row;
+            
+            if (region_row >= 0 && region_row < region.rows) {
+                region.at<uchar>(region_row, c) = pixel_value;
+                
+                // Only update statistics for black pixels (text)
+                if (pixel_value == 0) {
+                    update_covariance_recursive(cv::Point(c, i)); // Point(x,y) = (col,row)
+                }
+            }
         }
     }
-
-    // Calculate statistics for the region.
-    calculate_mean();
-    calculate_covariance();
 
     // Returns true if region is empty (all white).
     return countNonZero(region) == region.cols * region.rows;
 }
 
-// Calculates mean position of black pixels in the region.
-void Region::calculate_mean() {
-    mean[0] = mean[1] = 0.0f;
-    int n = 0;
-    for (int i = 0; i < region.rows; i++) {
-        for (int j = 0; j < region.cols; j++) {
-            // if white pixel continue.
-            if (region.at<uchar>(i, j) == 255) continue;
-            if (n == 0) {
-                n = n + 1;
-                mean = Vec2f(i + row_offset, j);
-            } else {
-                mean = (n - 1.0) / n * mean + 1.0 / n * Vec2f(i + row_offset, j);
-                n = n + 1;
-            }
-        }
+// Caclulates the covariance recursively, 
+// utilizing equations from section 2.3.1. 
+void Region::update_covariance_recursive(const cv::Point& pixel_point) {
+    int n = this->pixel_count + 1;
+
+    // Converting pixel points to feature vectors [y, x],
+    // as the paper uses {x, y}.
+    cv::Vec2f new_vec(pixel_point.y, pixel_point.x); // y=row, x=col
+
+    // Recursive mean update. (Equation 1)
+    if (n == 1) {
+        this->mean = new_vec;
+    } else {
+        this->mean = (this->mean * (n-1) + new_vec) / n;
     }
-}
 
-// Calculates covariance matrix of black pixel positions.
-void Region::calculate_covariance() {
-    Mat covariance = Mat::zeros(2, 2, CV_32F);
+    // Recursive covariance update. (Equation 2)
+    if (n > 1) {
+        cv::Vec2f diff = new_vec - this->mean;
+        cv::Mat diff_mat = (cv::Mat_<float>(2,1) << diff[0], diff[1]);
+        cv::Mat update = diff_mat * diff_mat.t();
 
-    int n = 0; // Total number of considered points so far.
-    float sum_i_squared = 0, sum_j_squared = 0, sum_i_j = 0;
-
-    for (int i = 0; i < region.rows; i++) {
-        for (int j = 0; j < region.cols; j++) {
-            // if white pixel continue.
-            if ((int) region.at<uchar>(i, j) == 255) continue;
-
-            float new_i = i + row_offset - mean[0];
-            float new_j = j - mean[1];
-
-            sum_i_squared += new_i * new_i;
-            sum_i_j += new_i * new_j;
-            sum_j_squared += new_j * new_j;
-            n++;
+        if (n == 2) {
+            // Initializing covariance for the second point.
+            this->covariance = update;
+        } else {
+            // Recursive update for subsequent points.
+            this->covariance = (this->covariance * (n-2) + update) / (n-1);
         }
     }
 
-    // Normalizes by number of points.
-    if (n) {
-        covariance.at<float>(0, 0) = sum_i_squared / n;
-        covariance.at<float>(0, 1) = sum_i_j / n;
-        covariance.at<float>(1, 0) = sum_i_j / n;
-        covariance.at<float>(1, 1) = sum_j_squared / n;
-
-    }
-
-    this->covariance = covariance.clone();
+    this->pixel_count = n;
 }
 
 // Calculates Gaussian probability density for a point in this region.
