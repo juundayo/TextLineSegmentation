@@ -572,11 +572,19 @@ bool LineSegmentation::component_belongs_to_above_region(Line &line, Rect &conto
             contour_point.at<float>(0, 1) = i_contour;
 
             // Gets probabilities using Gaussian density models.
-            int newProbAbove = (int) ((line.above != nullptr) ? (line.above->bi_variate_gaussian_density(
-                    contour_point.clone())) : 0);
-            int newProbBelow = (int) ((line.below != nullptr) ? (line.below->bi_variate_gaussian_density(
-                    contour_point.clone())) : 0);
+            // Also scales them to maintain precision (1e6 scale factor).
+            int newProbAbove = 0;
+            int newProbBelow = 0;
 
+            if (line.above != nullptr) {
+                double prob = line.above->bi_variate_gaussian_density(contour_point.clone());
+                newProbAbove = static_cast<int>(prob * 1000000); 
+            }
+            
+            if (line.below != nullptr) {
+                double prob = line.below->bi_variate_gaussian_density(contour_point.clone());
+                newProbBelow = static_cast<int>(prob * 1000000);
+            }
             // Factorizes probabilities into prime components.
             addPrimesToVector(newProbAbove, probAbovePrimes);
             addPrimesToVector(newProbBelow, probBelowPrimes);
@@ -739,6 +747,23 @@ void Chunk::calculate_histogram() {
             current_height = 0;
         }
     }
+
+    // Smoothing! Applying a moving average filter as mentioned in the paper.
+    // ["Smoothing is done to remove spurious peaks and valleys... using a 
+    // simple moving average filter with window of length 5"]
+    vector<int> smoothed_histogram = this->histogram;
+    int window_size = 5;
+
+    for (int i = window_size/2; i < this->histogram.size() - window_size/2; i++) {
+        int sum = 0;
+        for (int j = -window_size/2; j <= window_size/2; j++) {
+            sum += this->histogram[i+j];
+        }
+        smoothed_histogram[i] = sum / window_size;
+    }
+
+    // Replacing the original histogram with the smoothed version.
+    this->histogram = smoothed_histogram;
 
     // Calculates average white space height (excluding outliers).
     sort(white_spaces.begin(), white_spaces.end());
