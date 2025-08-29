@@ -130,18 +130,18 @@ void LineSegmentation::generate_chunks() {
 
 // Recursively connects valleys across chunks to form text lines.
 Line *LineSegmentation::connect_valleys(int i, Valley *current_valley, Line *line, int valleys_min_abs_dist) {
-    if (i <= 0 || chunks[i]->valleys.empty()) return line;
+    if (i >= chunks.size() || chunks[i]->valleys.empty()) return line;
 
     // Finding the closest valley in the right chunk to connect to.
     int connected_to = -1;
     int min_distance = 100000;
+
     for (int j = 0; j < this->chunks[i]->valleys.size(); j++) {
         Valley *valley = this->chunks[i]->valleys[j];
         if (valley->used) continue; // Skipping already used valleys.
 
         // Calculating vertical distance between valleys.
-        int dist = current_valley->position - valley->position;
-        dist = dist < 0 ? -dist : dist;
+        int dist = abs(current_valley->position - valley->position);;
 
         // Finding the minimum distance within allowed threshold.
         if (min_distance > dist && dist <= valleys_min_abs_dist) {
@@ -159,8 +159,8 @@ Line *LineSegmentation::connect_valleys(int i, Valley *current_valley, Line *lin
     Valley *v = this->chunks[i]->valleys[connected_to];
     v->used = true;
 
-    // Recursive call.
-    return connect_valleys(i - 1, v, line, valleys_min_abs_dist);
+    // Recursive call. Fixed to connect from left to right.
+    return connect_valleys(i + 1, v, line, valleys_min_abs_dist); 
 }
 
 // Detects initial text lines by connecting valleys across chunks.
@@ -178,10 +178,10 @@ void LineSegmentation::get_initial_lines() {
     this->predicted_line_height = valleys_min_abs_dist;
     
     // Added some tolerance.
-    // valleys_min_abs_dist = valleys_min_abs_dist * 1.2;
+    valleys_min_abs_dist = valleys_min_abs_dist * 1.2;
 
-    // Starting from the rightmost processed chunk and connecting valleys leftwards.
-    for (int i = CHUNKS_TO_BE_PROCESSED - 1; i >= 0; i--) {
+    // Starting from the leftmost processed chunk and connecting valleys rightwards.
+    for (int i = 0; i < CHUNKS_TO_BE_PROCESSED; i++) {
         if (i<0 || i>=chunks.size()) continue; 
         if (chunks[i]->valleys.empty()) continue;
 
@@ -194,7 +194,8 @@ void LineSegmentation::get_initial_lines() {
 
             // Creating a new line starting from this valley.
             Line *new_line = new Line(valley->valley_id);
-            new_line = connect_valleys(i - 1, valley, new_line, valleys_min_abs_dist);
+
+            new_line = connect_valleys(i + 1, valley, new_line, valleys_min_abs_dist);
             new_line->generate_initial_points(chunk_width, color_img.cols, map_valley);
 
             // Only keeping lines with multiple valleys (more reliable).
@@ -786,7 +787,7 @@ int Chunk::find_peaks_valleys(map<int, Valley *> &map_valley) {
 
     // Keeps peaks above threshold.
     for (auto peak : peaks) {
-        if (peak.value >= peaks_average_values / 4) {
+        if (peak.value >= peaks_average_values / 6) {
             new_peaks.push_back(peak);
         }
     }
@@ -1017,10 +1018,24 @@ double Region::bi_variate_gaussian_density(Mat point) {
      // Calculates Mahalanobis distance.
     Mat point_transpose;
     transpose(point, point_transpose);
-    Mat ret = ((point * this->covariance.inv() * point_transpose));
-    ret *= sqrt(determinant(this->covariance * 2 * M_PI));
 
-    return ret.at<float>(0, 0);
+    // Old inaccurate formula calculation.
+    // Mat ret = ((point * this->covariance.inv() * point_transpose));
+    // ret *= sqrt(determinant(this->covariance * 2 * M_PI));
+
+    //return ret.at<float>(0, 0);
+
+    // Gaussian formula: (1/(2π√|Σ|)) * exp(-0.5*(x-μ)ᵀΣ⁻¹(x-μ))
+    Mat exponent_mat = point * this->covariance.inv() * point_transpose;
+    float exponent = exponent_mat.at<float>(0, 0);
+    
+    double det = cv::determinant(this->covariance);
+    if (det <= 0) det = 1e-10; // Avoid division by zero
+    
+    double normalization = 1.0 / (2 * M_PI * sqrt(det));
+    double probability = normalization * exp(-0.5 * exponent);
+
+    return probability; // Return the double probability value directly
 }
 
 // Sieve of Eratosthenes for prime number generation.
