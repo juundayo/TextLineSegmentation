@@ -137,26 +137,18 @@ private:
     cv::Vec2f mean;
     ///< The mean of the matrix.
 
+    int pixel_count;
+
     Region(Line *top, Line *bottom);
 
     /// Get the region matrix
     /// \param img
     /// \param region_id
     /// \return
-    bool
-    update_region(Mat &img, int);
-
-    /// Calculate region black pixels mean relative to the whole image dimensions
-    void
-    calculate_mean();
-
-    /// Calculate region black pixels covariance relative to the whole image dimensions
-    void
-    calculate_covariance();
-
-    /// Calculate bi-variate Gaussian density given a point.
-    double
-    bi_variate_gaussian_density(Mat point);
+    
+    bool update_region(Mat &img, int);
+    void update_covariance_recursive(const cv::Point& pixel_point);
+    double bi_variate_gaussian_density(Mat point);
 };
 
 /// Image Chunk.
@@ -205,13 +197,11 @@ private:
     bool not_primes_arr[100007];
     vector<int> primes;
 
-    void
-    sieve();
+    void sieve();
+    void addPrimesToVector(int, vector<int> &);
+    bool distance_metric_decision(Line &line, Rect &contour);
 
-    void
-    addPrimesToVector(int, vector<int> &);
-
-    //first color index for identify regions from up to down
+    // First color index for identify regions from up to down.
     int redStart = 20;
 
 public:
@@ -232,11 +222,8 @@ public:
     // Saving the image in PNG 16-bit with label numbers.
     void save_label_image(const std::vector<cv::Mat> &regions, const std::string &output_path);
 
-    //document image labelling
     void labelImage(string path);
-    //label a section of the image from y-pointactualLine to y1 pointnextLine
-    void
-    labelComponent(const vector<cv::Point> &pointnextLine, const vector<cv::Point> &pointactualLine, cv::Mat &img_clone);
+    void labelComponent(const vector<cv::Point> &pointnextLine, const vector<cv::Point> &pointactualLine, cv::Mat &img_clone);
 
 private:
     string OUT_PATH;
