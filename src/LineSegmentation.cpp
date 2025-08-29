@@ -177,8 +177,8 @@ void LineSegmentation::get_initial_lines() {
     cout << "Estimated avg line height " << valleys_min_abs_dist << endl;
     this->predicted_line_height = valleys_min_abs_dist;
     
-    // Added some tolerance.
-    valleys_min_abs_dist = valleys_min_abs_dist * 1.2;
+    // Added dynamic tolerance.
+    valleys_min_abs_dist = valleys_min_abs_dist * (1.1 + (number_of_heights > 10 ? 0.1 : 0.0));
 
     // Starting from the leftmost processed chunk and connecting valleys rightwards.
     for (int i = 0; i < CHUNKS_TO_BE_PROCESSED; i++) {
@@ -560,6 +560,33 @@ bool LineSegmentation::component_belongs_to_above_region(Line &line, Rect &conto
     vector<int> probBelowPrimes(primes.size(), 0);
     int n = 0;
 
+    // Paper section 2.3.2: Distance metric fallback conditions:
+    // Checking if we should use distance metric instead of Gaussians.
+    bool use_distance_metric = false;
+
+    // Condition 1: Component in first 25% of document (insufficient data for Gaussian).
+    if (contour.x < binary_img.cols * 0.25) {
+        use_distance_metric = true;
+    }
+    // Condition 2: Not enough pixels in regions to model Gaussian reliably.
+    else if ((line.above != nullptr && line.above->region.empty()) || 
+             (line.below != nullptr && line.below->region.empty())) {
+        use_distance_metric = true;
+    }
+    // Condition 3: Very small components (like Greek tonos).
+    else if (contour.area() < 50) {
+        use_distance_metric = true;
+    }
+    // Condition 4: If either region pointer is null
+    else if (line.above == nullptr || line.below == nullptr) {
+        use_distance_metric = true;
+    }
+
+    // If any fallback condition is met, use distance metric.
+    if (use_distance_metric) {
+        return distance_metric_decision(line, contour);
+    }
+
     // Calculates probabilities for each pixel in the contour.
     for (int i_contour = contour.tl().x; i_contour < contour.tl().x + contour.width; i_contour++) {
         for (int j_contour = contour.tl().y; j_contour < contour.tl().y + contour.height; j_contour++) {
@@ -591,6 +618,17 @@ bool LineSegmentation::component_belongs_to_above_region(Line &line, Rect &conto
         }
     }
 
+    // Additional fallback: if Gaussian probabilities are negligible.
+    double probAboveSum = 0, probBelowSum = 0;
+    for (int k = 0; k < probAbovePrimes.size(); ++k) {
+        probAboveSum += probAbovePrimes[k] * primes[k];
+        probBelowSum += probBelowPrimes[k] * primes[k];
+    }
+    
+    if (probAboveSum < 1e-10 && probBelowSum < 1e-10) {
+        return distance_metric_decision(line, contour);
+    }
+
     // Reconstructs probabilities from prime factors.
     int prob_above = 0, prob_below = 0;
     for (int k = 0; k < probAbovePrimes.size(); ++k) {
@@ -605,6 +643,41 @@ bool LineSegmentation::component_belongs_to_above_region(Line &line, Rect &conto
 
     /// Contour belongs to region with the higher probability.
     return prob_above < prob_below;
+}
+
+// Fallback for when Gaussian probabilities are too small.
+bool LineSegmentation::distance_metric_decision(Line &line, Rect &contour) {
+    cv::Point center(contour.x + contour.width/2, contour.y + contour.height/2);
+    
+    double dist_to_above = std::numeric_limits<double>::max();
+    double dist_to_below = std::numeric_limits<double>::max();
+    
+    // Distance to above region center.
+    if (line.above != nullptr) {
+        dist_to_above = abs(center.y - line.above->mean[0]);
+    }
+
+    // Distance to below region center.
+    if (line.below != nullptr) {
+        dist_to_below = abs(center.y - line.below->mean[0]);
+    }
+    
+    // If both distances are max (no regions available), default heuristic.
+    if (dist_to_above == std::numeric_limits<double>::max() && 
+        dist_to_below == std::numeric_limits<double>::max()) {
+        // Default: if component is in upper half of line, associate above
+        if (line.points.size() > 0) {
+            double line_center_y = 0;
+            for (const auto& point : line.points) {
+                line_center_y += point.x;
+            }
+            line_center_y /= line.points.size();
+            return center.y < line_center_y;
+        }
+        return true; // fallback to above
+    }
+
+    return dist_to_above < dist_to_below;
 }
 
 vector<cv::Mat> LineSegmentation::segment() {
@@ -1078,7 +1151,10 @@ void LineSegmentation::sieve() {
 
 // Factorizes a number into prime components for probability comparison.
 void LineSegmentation::addPrimesToVector(int n, vector<int> &probPrimes) {
-    for (int i = 0; i < primes.size(); ++i) {
+    // Scaling and clamping to avoid overflow.
+    n = std::max(0, std::min(n, 1000000)); // Reasonable bounds.
+    
+    for (int i = 0; i < primes.size() && n > 1; ++i) {
         while (n % primes[i]) {
             n /= primes[i];
             probPrimes[i]++;
