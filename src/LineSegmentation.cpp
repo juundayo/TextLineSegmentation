@@ -721,7 +721,7 @@ vector<cv::Mat> LineSegmentation::segment() {
     if (!OUT_PATH.empty()) {
         try {
             fs::path outp(OUT_PATH);
-            fs::path img_dir = outp.parent_path(); // if OUT_PATH == "img/out" -> img_dir == "img"
+            fs::path img_dir = outp.parent_path(); 
             if (img_dir.empty()) img_dir = ".";
 
             // Removing existing image files.
