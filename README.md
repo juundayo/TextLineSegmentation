@@ -26,4 +26,4 @@ A robust tool for segmenting handwritten documents into individual lines of text
 - Valley connection across chunks.
 
 ### Refinement and Region Extraction
-- Line adjusting through Gaussian modeling & distance calculation.
+- Line adjusting through Gaussian modelling & distance calculation.
