@@ -126,6 +126,39 @@ void LineSegmentation::generate_chunks() {
 
         start_pixel += chunk_width; // Moving to the next chunk position.
     }
+
+    // Debugging chunk projection profiles.
+    for (int i = 0; i < std::min(5, (int)chunks.size()); ++i) {
+        Chunk* chunk = chunks[i];
+        cv::Mat chunk_img = chunk->img.clone();
+
+        std::vector<int> profile(chunk_img.rows, 0);
+        for (int y = 0; y < chunk_img.rows; ++y) {
+            for (int x = 0; x < chunk_img.cols; ++x) {
+                if (chunk_img.at<uchar>(y, x) == 0) 
+                    profile[y]++;
+            }
+        }
+
+        // Normalizing the profile for visualization.
+        int max_val = *std::max_element(profile.begin(), profile.end());
+        if (max_val == 0) max_val = 1; // prevent division by zero
+        cv::Mat profile_img(chunk_img.rows, chunk_img.cols, CV_8UC3, cv::Scalar(255, 255, 255));
+
+        for (int y = 0; y < profile.size(); ++y) {
+            int length = (profile[y] * chunk_img.cols) / max_val;
+            cv::line(profile_img, cv::Point(0, y), cv::Point(length, y), cv::Scalar(0, 0, 255), 1);
+        }
+
+        for (int y = 1; y < profile.size() - 1; ++y) {
+            if (profile[y] > profile[y - 1] && profile[y] > profile[y + 1] && profile[y] > 0.5 * max_val) {
+                cv::line(chunk_img, cv::Point(0, y), cv::Point(chunk_img.cols, y), cv::Scalar(0, 255, 0), 1);
+            }
+        }
+
+        cv::imwrite(OUT_PATH + "chunk_" + std::to_string(i) + "_profile.jpg", profile_img);
+        cv::imwrite(OUT_PATH + "chunk_" + std::to_string(i) + "_peaks.jpg", chunk_img);
+    }
 }
 
 // Recursively connects valleys across chunks to form text lines.
@@ -154,7 +187,7 @@ Line *LineSegmentation::connect_valleys(int i, Valley *current_valley, Line *lin
         return line;
     }
 
-    // Connecting to the found valley and continuing connecting leftwards.
+    // Connecting to the found valley and continuing connecting rightwards.
     line->valleys_ids.push_back(this->chunks[i]->valleys[connected_to]->valley_id);
     Valley *v = this->chunks[i]->valleys[connected_to];
     v->used = true;
