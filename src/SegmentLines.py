@@ -33,16 +33,11 @@ This implementation follows the paper’s logic and math:
 Dependencies: numpy, opencv‑python, matplotlib (for profile plots), pillow (only for robust save)
 """
 
-
-# ----------------------------------------------------------------------------#
-
-
 from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
-
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
@@ -51,10 +46,8 @@ import shutil
 
 # ----------------------------------------------------------------------------#
 
-
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
-
 
 def clear_directory(path: str):
     """
@@ -65,20 +58,17 @@ def clear_directory(path: str):
         shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
 
-
 def imread_grayscale(path: str) -> np.ndarray:
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Could not read image: {path}")
     return img
 
-
 def save_image(path: str, img: np.ndarray):
     # Ensure uint8 0..255
     if img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
     Image.fromarray(img).save(path)
-
 
 def moving_average(x: np.ndarray, w: int = 5) -> np.ndarray:
     if w <= 1:
@@ -87,7 +77,6 @@ def moving_average(x: np.ndarray, w: int = 5) -> np.ndarray:
     xpad = np.pad(x, (pad, pad), mode='edge')
     kernel = np.ones(w, dtype=np.float32) / float(w)
     return np.convolve(xpad, kernel, mode='valid')
-
 
 def find_peaks_and_valleys(profile: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -117,9 +106,7 @@ def find_peaks_and_valleys(profile: np.ndarray) -> Tuple[np.ndarray, np.ndarray]
             valleys.append(idx)
     return np.array(sorted(set(peaks)), dtype=int), np.array(sorted(set(valleys)), dtype=int)
 
-
 # ----------------------------------------------------------------------------#
-
 
 def binarize(image: np.ndarray, debug_dir: Optional[str] = None) -> np.ndarray:
     # Otsu threshold.
@@ -164,7 +151,6 @@ class ChunkProfiles:
     first25_smoothed: np.ndarray
     height: int
     width: int
-
 
 def compute_chunk_profiles(bin_img: np.ndarray, window: int = 5, out_dir: Optional[str] = None) -> ChunkProfiles:
     H, W = bin_img.shape
@@ -212,7 +198,6 @@ def compute_chunk_profiles(bin_img: np.ndarray, window: int = 5, out_dir: Option
         chunk_profiles, chunk_smoothed, chunk_x_ranges, first25_smoothed, H, W
     )
 
-
 # ----------------------------------------------------------------------------#
 
 @dataclass
@@ -222,27 +207,72 @@ class LinePath:
     y_by_x: Dict[int, int]  # x -> y
 
 
-def select_valleys(sm: np.ndarray,
-                   min_prom_rel: float = 0.20,
-                   min_dist: int | None = None,
-                   window_prom: int | None = None,
-                   abs_prom: float = 2.0) -> np.ndarray:
+def estimate_local_stats(profs: ChunkProfiles):
     """
-    From a smoothed projection profile `sm`, pick valley indices that are:
-      - deep enough (prominence >= max(abs_prom, min_prom_rel * (max-min)))
-      - not too close to each other (min_dist)
-    Returns sorted integer indices.
+    Compute dynamic measures from the chunk profiles:
+      - mean_profile_range : average (max-min) across chunks
+      - median_valley_spacing: median distance between adjacent valleys in first25 profile
+      - approx_line_height: rough expected line height (fallback)
+    """
+    H, W = profs.height, profs.width
+    # per-chunk profile ranges
+    ranges = [float(np.max(p) - np.min(p)) if p.size else 0.0 for p in profs.chunk_profiles]
+    mean_profile_range = float(np.median(ranges)) if ranges else 1.0
+
+    # estimate spacing from first25
+    first = profs.first25_smoothed
+    p_peaks, p_valleys = find_peaks_and_valleys(first)
+    if len(p_valleys) >= 2:
+        spacings = np.diff(np.sort(p_valleys)).astype(float)
+        median_valley_spacing = float(np.median(spacings)) if spacings.size else max(20.0, profs.height/20.0)
+    else:
+        # fallback proportional to image height (guess 1/20th)
+        median_valley_spacing = max(20.0, H / 20.0)
+
+    # approximate line height (use conservative estimate)
+    approx_line_height = max(8.0, 0.6 * median_valley_spacing)
+
+    return {
+        "mean_profile_range": mean_profile_range,
+        "median_valley_spacing": median_valley_spacing,
+        "approx_line_height": approx_line_height
+    }
+
+
+def select_valleys(sm: np.ndarray,
+                   min_prom_rel: Optional[float] = None,
+                   min_dist: Optional[int] = None,
+                   window_prom: Optional[int] = None,
+                   abs_prom: Optional[float] = None,
+                   dynamic_stats: Optional[dict] = None) -> np.ndarray:
+    """
+    Adaptive valley selection:
+      - min_prom_rel, min_dist, window_prom and abs_prom are computed dynamically if None
+      - returns valleys sorted by increasing sm[value] (deepest first)
     """
     peaks, valleys = find_peaks_and_valleys(sm)
     if len(valleys) == 0:
         return np.array([], dtype=int)
 
     H = len(sm)
+    # dynamic stats fallback
     rng = float(np.max(sm) - np.min(sm)) if np.max(sm) > np.min(sm) else 1.0
+    if dynamic_stats is None:
+        # minimal defaults
+        median_spacing = max(20.0, H / 20.0)
+    else:
+        median_spacing = float(dynamic_stats.get("median_valley_spacing", max(20.0, H / 20.0)))
+
+    # dynamic defaults
     if window_prom is None:
-        window_prom = max(8, H // 40)
+        window_prom = int(max(6, min( max(8, H // 40), median_spacing // 2 )))
     if min_dist is None:
-        min_dist = max(6, H // 100)
+        # require separation proportional to estimated line spacing
+        min_dist = int(max(6, round(0.35 * median_spacing)))
+    if abs_prom is None:
+        abs_prom = max(1.0, 0.06 * rng)  # small absolute floor relative to profile range
+    if min_prom_rel is None:
+        min_prom_rel = max(0.10, 0.12 * (median_spacing / max(20.0, median_spacing)))  # weaker for small spacing
 
     candidates = []
     for v in valleys:
@@ -251,16 +281,21 @@ def select_valleys(sm: np.ndarray,
         left_max = np.max(sm[l:v]) if v > l else sm[v]
         right_max = np.max(sm[v+1:r]) if v+1 < r else sm[v]
         prom = min(left_max, right_max) - sm[v]
-        if prom >= max(abs_prom, min_prom_rel * rng):
-            candidates.append(int(v))
+        # dynamic threshold uses both relative to range and absolute floor
+        thresh = max(abs_prom, min_prom_rel * rng)
+        if prom >= thresh:
+            candidates.append((int(v), float(prom)))
 
     if not candidates:
         return np.array([], dtype=int)
 
-    # Keeping the deepest valleys first, enforcing min_dist.
-    candidates = sorted(set(candidates), key=lambda ii: sm[ii])  # smallest sm[ii] = deepest
+    # rank by a combined score: deeper valleys and (optionally) local contrast (prom)
+    # we'll sort ascending by sm[v] (deeper) and descending prom as tie-breaker
+    candidates_sorted = sorted(candidates, key=lambda t: (sm[t[0]], -t[1]))
+
+    # enforce min_dist greedily on the sorted candidates but prefer deepest
     selected = []
-    for v in candidates:
+    for v, p in candidates_sorted:
         if all(abs(v - s) >= min_dist for s in selected):
             selected.append(v)
     selected.sort()
@@ -286,9 +321,9 @@ def initial_candidate_lines(profs: ChunkProfiles,
     N = len(profs.chunk_smoothed)
     if N == 0:
         return []
-
+    
     if min_dist_pixels is None:
-        min_dist_pixels = max(6, H // 100)
+        min_dist_pixels = max(6, H // 130)
 
     # Chunk x boundaries.
     chunk_x0s = [r[0] for r in profs.chunk_x_ranges]
@@ -449,7 +484,6 @@ def initial_candidate_lines(profs: ChunkProfiles,
                 if int(yn) not in existing_assigned:
                     # Only spawn if valley is strong enough (non-trivial)!
                     lines.append(LinePath(y_by_x={x_next: int(yn)}))
-
         else:
             # If either side has no valleys, simply propagate previous y forward for each line.
             for lp in lines:
@@ -592,9 +626,7 @@ def initial_candidate_lines(profs: ChunkProfiles,
 
     return lines
 
-
 # ----------------------------------------------------------------------------#
-
 
 class RunningGaussian2D:
     def __init__(self):
@@ -612,7 +644,7 @@ class RunningGaussian2D:
         # Recursive mean.
         mu_new = ( (self.N - 1) / self.N ) * self.mu + (1.0 / self.N) * p
         # Covariance update using Welford-like; paper gives a slightly different recursive form.
-        # We’ll compute unbiased sample covariance at query time.
+        # We'll compute unbiased sample covariance at query time.
         delta = p - self.mu
         delta2 = p - mu_new
         self.S += np.outer(delta, delta2)
@@ -627,10 +659,11 @@ class RunningGaussian2D:
         mu = self.mu
         Sigma = self.covariance()
         
-        # Checking for valid input.
+        # Check for valid input
         if np.any(np.isnan(mu)) or np.any(np.isnan(Sigma)):
             return -1e6
         
+        # Ensure Sigma is positive definite with stronger regularization
         Sigma = Sigma + np.eye(2) * 1e-6  
         
         try:
@@ -639,11 +672,12 @@ class RunningGaussian2D:
             diff = p - mu
             z = inv_L @ diff
             mahalanobis = np.sum(z**2)
-            mahalanobis = np.clip(mahalanobis, 0, 50) 
+            mahalanobis = np.clip(mahalanobis, 0, 50)  # tighter clamp
 
             log_det = 2 * np.sum(np.log(np.diag(L) + 1e-12))
             logp = -0.5 * (2 * np.log(2 * np.pi) + log_det + mahalanobis)
 
+            # Bound logp to avoid extreme influence
             return float(logp if logp > -1e6 else -1e6)
 
         except np.linalg.LinAlgError:
@@ -656,17 +690,14 @@ class RunningGaussian2D:
             logp = -0.5 * (2 * np.log(2 * np.pi) + log_det + mahalanobis)
             return float(logp if logp > -1e6 else -1e6)
 
-
 # ----------------------------------------------------------------------------#
-
 
 @dataclass
 class SegmentationResult:
     line_paths: List[LinePath]
-    ymap: np.ndarray         # shape (W, L): y position for each line per x
-    overlay: np.ndarray      # RGB overlay image
+    ymap: np.ndarray  # shape (W, L): y position for each line per x
+    overlay: np.ndarray  # RGB overlay image
     assignments: np.ndarray  # label image (0..L-1 for foreground; 255 background)
-
 
 def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, lines: List[LinePath],
                                profs: ChunkProfiles, debug_dir: Optional[str] = None) -> SegmentationResult:
@@ -684,7 +715,7 @@ def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, line
         known_xs = np.array(sorted(lp.y_by_x.keys()))
         known_ys = np.array([lp.y_by_x[x] for x in known_xs])
         
-        # Interpolating to get y values for all x positions.
+        # Interpolate to get y values for all x positions
         if len(known_xs) > 1:
             ymap[:, li] = np.interp(xs_all, known_xs, known_ys).astype(int)
         else:
@@ -693,7 +724,7 @@ def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, line
     # Gets connected components for obstruction detection.
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(bin_img.astype(np.uint8), connectivity=8)
     
-    # Creating a mapping from component ID to its bounding box and pixels.
+    # Create a mapping from component ID to its bounding box and pixels
     comp_info = {}
     for comp_id in range(1, num_labels):
         x, y, w, h, area = stats[comp_id]
@@ -709,64 +740,64 @@ def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, line
     # Initializing Gaussian models for each line.
     gaussians = [RunningGaussian2D() for _ in range(L)]
     
-    # Updating Gaussians with initial line positions.
+    # Update Gaussians with initial line positions
     for x in range(W):
         for li in range(L):
             y_val = ymap[x, li]
             if 0 <= y_val < H:
                 gaussians[li].update(np.array([x, y_val], dtype=np.float64))
 
-    # Main line adjustment loop.
+    # Main line adjustment loop
     for x in range(W):
         for li in range(L):
             y_current = ymap[x, li]
             
-            # Checking if we hit a component at this position.
+            # Check if we hit a component at this position
             if 0 <= y_current < H and bin_img[y_current, x] > 0:
                 comp_id = labels[y_current, x]
-                if comp_id == 0:  # Background.
+                if comp_id == 0:  # Background
                     continue
                     
                 comp_data = comp_info[comp_id]
                 x_comp, y_comp, w_comp, h_comp = comp_data['bbox']
                 comp_min_y, comp_max_y = comp_data['min_y'], comp_data['max_y']
                 
-                # Determining if this is an overlapping component (spans multiple lines).
+                # Determine if this is an overlapping component (spans multiple lines)
                 is_overlapping = False
                 if li > 0 and li < L-1:
-                    # Checking if the component spans across adjacent lines.
+                    # Check if component spans across adjacent lines
                     y_above = ymap[x, li-1]
                     y_below = ymap[x, li+1]
                     is_overlapping = (comp_min_y < (y_above + y_current)/2 and 
                                      comp_max_y > (y_current + y_below)/2)
                 
                 if is_overlapping:
-                    # Cutting through at the valley position.
+                    # Cut through at the valley position
                     chunk_idx = min(x // (W // len(profs.chunk_smoothed)), len(profs.chunk_smoothed)-1)
                     sm = profs.chunk_smoothed[chunk_idx]
                     valleys = select_valleys(sm)
                     
                     if len(valleys) > 0:
-                        # Finding the deepest valley within the component's vertical range.
+                        # Find the deepest valley within the component's vertical range
                         valley_in_range = [v for v in valleys if comp_min_y <= v <= comp_max_y]
                         if valley_in_range:
                             cut_y = min(valley_in_range, key=lambda v: sm[v])
-                            # Adjusting the line to cut through at the valley.
+                            # Adjust the line to cut through at the valley
                             for xx in range(max(0, x_comp), min(W, x_comp + w_comp)):
                                 ymap[xx, li] = cut_y
                                 gaussians[li].update(np.array([xx, cut_y], dtype=np.float64))
                 else:
-                    # Regular obstructing component - deciding whether to go above or below.
+                    # Regular obstructing component - decide whether to go above or below
                     use_distance = (x < int(0.25 * W)) or (gaussians[li].N < 10)
                     decision = None
                     
                     if not use_distance and li > 0 and li < L-1:
-                        # Gaussian decision.
+                        # Use Gaussian decision
                         logp_above_total = 0.0
                         logp_below_total = 0.0
                         pixels = comp_data['pixels']
                         
-                        # Sampling points for efficiency.
+                        # Sample points for efficiency
                         sample_size = min(100, len(pixels))
                         indices = np.random.choice(len(pixels), sample_size, replace=False)
                         
@@ -776,16 +807,14 @@ def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, line
                             logp_above_total += gaussians[li-1].logpdf(p_xy)
                             logp_below_total += gaussians[li+1].logpdf(p_xy)
 
-                        # Calculating average log probabilities.
+                        # Calculate average log probabilities
                         avg_logp_above = logp_above_total / sample_size
                         avg_logp_below = logp_below_total / sample_size
 
-                        # Using log probability difference for decision.
+                        # Use log probability difference for decision
                         diff = avg_logp_above - avg_logp_below
                         scale = max(abs(avg_logp_above), abs(avg_logp_below), 1e-6)
                         norm_diff = diff / scale
-                        #print(norm_diff)
-
                         if norm_diff > 0.02:
                             decision = 'above'
                         elif norm_diff < -0.02:
@@ -805,39 +834,39 @@ def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, line
                         
                         decision = 'above' if pu < pd else 'below'
                     
-                    # Adjusting the line to traverse around the component.
+                    # Adjust the line to traverse around the component
                     if decision == 'above':
-                        # Going below the component.
+                        # Go below the component
                         new_y = comp_max_y + 1
                         for xx in range(max(0, x_comp), min(W, x_comp + w_comp)):
                             if new_y < H:
                                 ymap[xx, li] = new_y
                                 gaussians[li].update(np.array([xx, new_y], dtype=np.float64))
                     else:
-                        # Going above the component.
+                        # Go above the component
                         new_y = comp_min_y - 1
                         for xx in range(max(0, x_comp), min(W, x_comp + w_comp)):
                             if new_y >= 0:
                                 ymap[xx, li] = new_y
                                 gaussians[li].update(np.array([xx, new_y], dtype=np.float64))
 
-    # Overlay image.
+    # Build overlay image
     overlay = cv2.cvtColor(image_gray, cv2.COLOR_GRAY2BGR)
-    for x in range(0, W, 2):  # Drawing every other column for visibility.
+    for x in range(0, W, 2):  # Draw every other column for visibility
         for li in range(L):
             y = int(np.clip(ymap[x, li], 0, H-1))
             cv2.circle(overlay, (x, y), 1, (0, 0, 255), -1)
 
-    # Final assignment using vertical bands.
+    # Final assignment using vertical bands
     assignments = np.full((H, W), 255, dtype=np.uint8)
     boundary_mid_y = np.zeros((W, L-1), dtype=np.int32)
     
     for x in range(W):
-        # Computing mid boundaries between adjacent lines.
+        # Compute mid boundaries between adjacent lines
         for li in range(L-1):
             boundary_mid_y[x, li] = (ymap[x, li] + ymap[x, li+1]) // 2
         
-        # Assigning foreground pixels to lines based on vertical position.
+        # Assign foreground pixels to lines based on vertical position
         for y in range(H):
             if bin_img[y, x] > 0:
                 li = 0
@@ -848,9 +877,9 @@ def draw_lines_with_collisions(image_gray: np.ndarray, bin_img: np.ndarray, line
 
     return SegmentationResult(lines, ymap, overlay, assignments)
 
-
-# ----------------------------------------------------------------------------#
-
+# ------------------------------
+# Save per‑line images and final visuals
+# ------------------------------
 
 def save_outputs(res: SegmentationResult, bin_img: np.ndarray, out_dir: str):
     H, W = bin_img.shape
@@ -858,7 +887,7 @@ def save_outputs(res: SegmentationResult, bin_img: np.ndarray, out_dir: str):
 
     save_image(os.path.join(out_dir, 'overlay_lines.png'), res.overlay)
 
-    # Saving the label visualization.
+    # Save label visualization
     vis = np.full((H, W, 3), 255, dtype=np.uint8)
     rng = np.random.default_rng(123)
     palette = rng.integers(0, 255, size=(L, 3), dtype=np.uint8)
@@ -867,23 +896,23 @@ def save_outputs(res: SegmentationResult, bin_img: np.ndarray, out_dir: str):
         vis[y, x] = palette[res.assignments[y, x]]
     save_image(os.path.join(out_dir, 'assignment_map.png'), vis)
 
-    # Extracting and saving each line as a tight crop.
+    # Extract and save each line as a tight crop
     ldir = os.path.join(out_dir, 'lines')
     for li in range(L):
         mask = (res.assignments == li).astype(np.uint8) * 255
+        # tight bounding box
         ys, xs = np.where(mask > 0)
         if len(xs) == 0:
             continue
-
         x0, x1 = xs.min(), xs.max()+1
         y0, y1 = ys.min(), ys.max()+1
         crop = mask[y0:y1, x0:x1]
-        
+        # Put on white background
         save_image(os.path.join(ldir, f'line_{li+1:04d}.png'), 255 - crop)
 
-
-# ----------------------------------------------------------------------------#
-
+# ------------------------------
+# CLI
+# ------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -897,7 +926,7 @@ def main():
 
     clear_directory(args.out)
 
-    ensure_dir(args.out)  
+    ensure_dir(args.out)  # top level
     ensure_dir(os.path.join(args.out, "chunks"))
     ensure_dir(os.path.join(args.out, "lines"))
     if args.debug:
